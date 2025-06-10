@@ -28,7 +28,7 @@ DEVICE       = torch.device("mps" if torch.backends.mps.is_available() else "cpu
 
 
 BATCH_SIZE   = 64
-NUM_EPOCHS   = 20              
+NUM_EPOCHS   = 14             
 NUM_STEPS    = 40                  # Number of time steps per forward pass
 LEARNING_RATE = 1e-3
 BETA         = 0.5                 # LIF membrane decay constant
@@ -291,7 +291,7 @@ def visualize_images(model: nn.Module, original: torch.Tensor, adversarial: torc
         # Plot spike visualization (average across channels)
         # spike_vis = np.mean(spk1_orig[i], axis=0)  # Average across channels
         # non-averaged spike visualization
-        spike_vis = spk1_orig[0]
+        spike_vis = spk1_orig[0][0]
         axes[i, 2].imshow(spike_vis, cmap='gray')
         axes[i, 2].set_title('Spike Output (Layer 1)')
         axes[i, 2].axis('off')
