@@ -16,7 +16,7 @@ import matplotlib.pyplot as plt
 import os
 import argparse
 from tqdm import tqdm
-import numpy as np  # Add numpy import
+import numpy as np 
 from data_loader import get_data_loaders
 
 # --------------------------------------------------
@@ -29,15 +29,15 @@ DEVICE       = torch.device("mps" if torch.backends.mps.is_available() else "cpu
 
 BATCH_SIZE   = 64
 NUM_EPOCHS   = 14             
-NUM_STEPS    = 40                  # Number of time steps per forward pass
+NUM_STEPS    = 40                  # Number of time steps per forward pass of the SNN to accumulate spikes
 LEARNING_RATE = 1e-3
 BETA         = 0.5                 # LIF membrane decay constant
 SPIKE_GRAD   = surrogate.fast_sigmoid()
 N_CLASSES    = 10
 
-# Optional PGD attack parameters
+# PGD attack parameters
 PGD_PARAMS = {
-    "eps": 0.00392 / 2,
+    "eps": 0.00392 * 2,
     "alpha": 0.01,
     "num_steps": 1,
     "targeted": False
@@ -163,6 +163,7 @@ def train_one_epoch(
             spike_sum += spk
         logits = spike_sum / num_steps
 
+        # Calculate losses and backpropagate
         loss = criterion(logits, labels)
         loss.backward()
         optimizer.step()
