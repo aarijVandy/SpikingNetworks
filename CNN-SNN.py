@@ -2,13 +2,14 @@
 Conv-SNN for MNIST with PGD adversarial testing
 Author : Aarij Atiq
 Date   : 2025-06-03 
+# ssh vunetid@login.accre.vu
+# to run: sbatch schedule.slurm
 """
 
 import torch, torch.nn as nn
 import torch.optim as optim
 import snntorch as snn
 from snntorch import surrogate, utils
-from torchvision import datasets, transforms
 from torch.utils.data import DataLoader
 from art.attacks.evasion import ProjectedGradientDescentPyTorch
 from art.estimators.classification import PyTorchClassifier
@@ -18,13 +19,23 @@ import argparse
 from tqdm import tqdm
 import numpy as np 
 from data_loader import get_data_loaders
-
+import SNNGradCAM
+from PIL import Image
+import random
+import Saliency_cam
 # --------------------------------------------------
 # 1. Hyperparameters and device setup
 # --------------------------------------------------
 
-#note: using MPS (Metal Performance Shaders) for mac. change to "cuda" for NVIDIA GPUS
-DEVICE       = torch.device("mps" if torch.backends.mps.is_available() else "cpu")
+SEED = 43  # Global seed
+random.seed(SEED)
+np.random.seed(SEED)
+torch.manual_seed(SEED)
+if torch.cuda.is_available():
+    torch.cuda.manual_seed_all(SEED)
+
+# note: using MPS (Metal Performance Shaders) for mac. change to "cuda" for NVIDIA GPUS
+DEVICE       = torch.device("mps" if torch.backends.mps.is_available() else "cuda" if torch.cuda.is_available() else "cpu")
 
 
 BATCH_SIZE   = 64
@@ -37,7 +48,7 @@ N_CLASSES    = 10
 
 # PGD attack parameters
 PGD_PARAMS = {
-    "eps": 0.00392 * 2,
+    "eps": 1.0/255.0 * 2.0,
     "alpha": 0.01,
     "num_steps": 1,
     "targeted": False
@@ -53,9 +64,9 @@ class ConvSNN(nn.Module):
     Convolutional Spiking Neural Network (Leaky LIF neurons) for MNIST.
     """
 
-    def __init__(self, beta: float, spike_grad):
+    def __init__(self, beta: float, spike_grad , input_channels: int = 1):
         super().__init__()
-        self.conv1 = nn.Conv2d(1, 8, kernel_size=5, stride=1, padding=0)
+        self.conv1 = nn.Conv2d(input_channels, 8, kernel_size=5, stride=1, padding=0)
         self.relu1 = nn.ReLU()
         self.lif1  = snn.Leaky(beta=beta, spike_grad=spike_grad, init_hidden=True, output=True)
         self.pool1 = nn.MaxPool2d(kernel_size=2, stride=2)
@@ -76,7 +87,11 @@ class ConvSNN(nn.Module):
             output=True
         )
     
+    
     def visualize(self, x: torch.Tensor):
+        """
+        for showing how SNNs use poisson-based encoding to encode image into spikes
+        """ 
         z = self.conv1(x)
         z = self.relu1(z)
         spk1 = self.lif1(z)[0]
@@ -107,9 +122,80 @@ class ConvSNN(nn.Module):
         return spk3  # spike tensor [B, N_CLASSES]
     
 
-# --------------------------------------------------
-# 4. Helper functions
-# --------------------------------------------------
+
+def get_samples(num_samples, data_loader, seed = SEED):  # Extract random samples from dataset
+
+    dataset = data_loader.dataset
+    rng = random.Random(seed)                 # local RNG
+    indices = rng.sample(range(len(dataset)), k=num_samples)
+
+    imgs, labs = [], []
+    for idx in indices:
+        img, lab = dataset[idx]
+        imgs.append(img)
+        labs.append(lab)
+    images = torch.stack(imgs, dim=0)
+    labels = torch.tensor(labs, dtype=torch.long)
+    return images, labels
+
+def spike_cam_single(image, label, model, DEVICE = DEVICE, NUM_STEPS = NUM_STEPS):
+    """
+    generates Class Activate Mapping for a single image
+    """
+    cam_extractor = SNNGradCAM.SNNGradCAM(model, model.conv2)
+    cams,pred = cam_extractor.generate_cam(image,
+                                    target_class=label,
+                                    num_steps=NUM_STEPS,
+                                    device=DEVICE)    # [B,H,W]
+    
+    idx = 0
+    fig, ax = plt.subplots(1, 2, figsize=(6,3))
+    ax[0].imshow(image[idx,0].cpu(), cmap='gray')
+    ax[0].set_title(f'Input — label {label[idx].item()}'); ax[0].axis('off')
+
+    # resize to overlay on orig image 
+    cam_np = cams[idx].cpu().numpy()
+    cam_img = Image.fromarray((cam_np * 255).astype(np.uint8))
+    cam_resized = cam_img.resize((28, 28), Image.BICUBIC)
+    cam_resized = np.array(cam_resized) / 255.0  # back to [0,1] float
+
+    ax[1].imshow(image[idx,0].cpu(), cmap='gray')
+    ax[1].imshow(cam_resized, alpha=0.5, cmap='jet')
+
+
+    ax[1].imshow(image[idx,0].cpu(), cmap='gray')
+    # cams[idx] = cams[idx].resize((28,28), Image.BICUBIC)   
+    ax[1].imshow(cam_resized, alpha=0.5, cmap = 'jet')                 # heat‑map overlay
+    ax[1].set_title(f'Grad‑CAM pred: {pred[idx]}'); ax[1].axis('off')
+    plt.tight_layout(); plt.show()
+
+    ax.cla()
+    # ax.clf
+
+    cam_extractor.close()          # clean up hooks
+
+
+def spike_cam(test_loader, model, DEVICE = DEVICE, NUM_STEPS = NUM_STEPS, num_images = 5):
+
+    # pick a batch from your loader
+    images,labels = get_samples(num_images, test_loader)
+    # images, labels = next(iter(test_loader))
+    images, labels = images.to(DEVICE), labels.to(DEVICE)
+
+    # target the second conv layer (after ReLU or LIF both work;
+    # here we tap into conv2 feature maps)
+    cam_extractor = SNNGradCAM.SNNGradCAM(model, model.conv2)
+
+    for i in range(num_images):
+        spike_cam_single(images[i], labels[i], model)
+
+    
+    cam_extractor.close()          # clean up hooks
+
+        
+
+
+
 def run_network(
     model: nn.Module,
     images: torch.Tensor,
@@ -290,9 +376,9 @@ def visualize_images(model: nn.Module, original: torch.Tensor, adversarial: torc
         axes[i, 1].axis('off')
         
         # Plot spike visualization (average across channels)
-        # spike_vis = np.mean(spk1_orig[i], axis=0)  # Average across channels
+        spike_vis = np.mean(spk1_orig[i], axis=0)  # Average across channels
         # non-averaged spike visualization
-        spike_vis = spk1_orig[0][0]
+#        spike_vis = spk1_orig[0]
         axes[i, 2].imshow(spike_vis, cmap='gray')
         axes[i, 2].set_title('Spike Output (Layer 1)')
         axes[i, 2].axis('off')
@@ -339,6 +425,13 @@ def evaluate_adversarial(
             num_steps=pgd_params["num_steps"],
             device=DEVICE,
         )
+        # num_samples = 5
+        # idx = 0
+        # if idx < num_samples:
+
+        #     spike_cam_single(x_adv, labels, model,
+        #                      DEVICE=DEVICE, NUM_STEPS=passes)
+        #     idx+=1
 
         # Evaluate model on adversarial examples
         logits = run_network(model, x_adv, passes, device)
@@ -362,15 +455,16 @@ def evaluate_adversarial(
     return avg_loss, accuracy
 
 
-# --------------------------------------------------
-# 5. Main training and testing orchestration
-# --------------------------------------------------
+
 def main(
+    test_model:bool = True,
     train_model: bool = False,
-    do_pgd: bool = True,
+    do_pgd: bool = False,
     pgd_params: dict = None,
     save_path: str = './checkpoints/conv_snn.pth',
     load_path: str = None,
+    dataset: str = "mnist",
+    visualize_images= True
     
 ):
     """
@@ -381,10 +475,15 @@ def main(
     load_path: if provided, load model weights from this path before testing/adversarial
     """
     # 5.1 Data loaders
-    train_loader, test_loader = get_data_loaders(BATCH_SIZE)
+    if dataset == "cifar10":
+        in_ch = 3
+    else:
+        in_ch = 1
+
+    train_loader, test_loader = get_data_loaders(dataset, BATCH_SIZE)
 
     # 5.2 Model, loss, optimizer
-    model = ConvSNN(beta=BETA, spike_grad=SPIKE_GRAD).to(DEVICE)
+    model = ConvSNN(beta=BETA, spike_grad=SPIKE_GRAD, input_channels=in_ch).to(DEVICE)
     criterion = nn.CrossEntropyLoss()
     optimizer = optim.Adam(model.parameters(), lr=LEARNING_RATE)
 
@@ -392,6 +491,15 @@ def main(
     if load_path is not None and os.path.exists(load_path):
         print(f"Loading model weights from {load_path}")
         model.load_state_dict(torch.load(load_path, map_location=DEVICE))
+
+    if visualize_images:
+        spike_cam(test_loader, model)
+
+    print("showing unadultered saliencies: ")
+    images, labels = get_samples(5, test_loader)
+    sal = Saliency_cam.saliency_map(model, images.to(DEVICE), labels.to(DEVICE), NUM_STEPS, DEVICE)
+    Saliency_cam.visualize_saliency(images, sal, labels)
+
 
     train_losses, train_accs = [], []
     test_losses, test_accs   = [], []
@@ -448,6 +556,13 @@ def main(
             f"Acc: {adv_acc:5.2f}%"
         )
 
+        print("showing perturbed saliencies: ")
+        images, labels = get_samples(5, test_loader)
+        sal = Saliency_cam.saliency_map(model, images.to(DEVICE), labels.to(DEVICE), NUM_STEPS, DEVICE)
+        Saliency_cam.visualize_saliency(images, sal, labels)
+
+
+
     # 5.5 Plot training curves (only if we trained)
     if train_model:
         epochs = list(range(1, NUM_EPOCHS + 1))
@@ -478,14 +593,23 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Train/test ConvSNN and run adversarial attacks.")
     parser.add_argument('--train', action='store_true', help='Train the model')
     parser.add_argument('--do_pgd', action='store_true', help='Run PGD adversarial test')
+    parser.add_argument('--test', action='store_true', help='test the trained model')
     parser.add_argument('--save_path', type=str, default='./checkpoints/conv_snn.pth', help='Path to save model')
     parser.add_argument('--load_path', type=str, default=None, help='Path to load model')
+    parser.add_argument('--dataset', type=str, default='mnist', help='Dataset to train on')
+    parser.add_argument('--test-model', action='store_true', help='Test model accuracy on clean data only (no PGD)')
     args = parser.parse_args()
 
+
+
     main(
+        test_model = args.test,
         train_model=args.train,
         do_pgd=args.do_pgd,
         save_path=args.save_path,
-        load_path=args.load_path
+        load_path=args.load_path,
+        dataset=args.dataset
+
+
     )
  
