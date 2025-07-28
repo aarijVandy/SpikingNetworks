@@ -19,40 +19,12 @@ import argparse
 from tqdm import tqdm
 import numpy as np 
 from data_loader import get_data_loaders
-import SNNGradCAM
 from PIL import Image
 import random
 import Saliency_cam
-# --------------------------------------------------
-# 1. Hyperparameters and device setup
-# --------------------------------------------------
+from utils import *
+from SNNGradCAM import SNNGradCAM
 
-SEED = 43  # Global seed
-random.seed(SEED)
-np.random.seed(SEED)
-torch.manual_seed(SEED)
-if torch.cuda.is_available():
-    torch.cuda.manual_seed_all(SEED)
-
-# note: using MPS (Metal Performance Shaders) for mac. change to "cuda" for NVIDIA GPUS
-DEVICE       = torch.device("mps" if torch.backends.mps.is_available() else "cuda" if torch.cuda.is_available() else "cpu")
-
-
-BATCH_SIZE   = 64
-NUM_EPOCHS   = 14             
-NUM_STEPS    = 40                  # Number of time steps per forward pass of the SNN to accumulate spikes
-LEARNING_RATE = 1e-3
-BETA         = 0.5                 # LIF membrane decay constant
-SPIKE_GRAD   = surrogate.fast_sigmoid()
-N_CLASSES    = 10
-
-# PGD attack parameters
-PGD_PARAMS = {
-    "eps": 1.0/255.0 * 2.0,
-    "alpha": 0.01,
-    "num_steps": 1,
-    "targeted": False
-}
 
 
 
@@ -121,80 +93,7 @@ class ConvSNN(nn.Module):
         spk3 = self.lif3(membrane)[0]
         return spk3  # spike tensor [B, N_CLASSES]
     
-
-
-def get_samples(num_samples, data_loader, seed = SEED):  # Extract random samples from dataset
-
-    dataset = data_loader.dataset
-    rng = random.Random(seed)                 # local RNG
-    indices = rng.sample(range(len(dataset)), k=num_samples)
-
-    imgs, labs = [], []
-    for idx in indices:
-        img, lab = dataset[idx]
-        imgs.append(img)
-        labs.append(lab)
-    images = torch.stack(imgs, dim=0)
-    labels = torch.tensor(labs, dtype=torch.long)
-    return images, labels
-
-def spike_cam_single(image, label, model, DEVICE = DEVICE, NUM_STEPS = NUM_STEPS):
-    """
-    generates Class Activate Mapping for a single image
-    """
-    cam_extractor = SNNGradCAM.SNNGradCAM(model, model.conv2)
-    cams,pred = cam_extractor.generate_cam(image,
-                                    target_class=label,
-                                    num_steps=NUM_STEPS,
-                                    device=DEVICE)    # [B,H,W]
-    
-    idx = 0
-    fig, ax = plt.subplots(1, 2, figsize=(6,3))
-    ax[0].imshow(image[idx,0].cpu(), cmap='gray')
-    ax[0].set_title(f'Input — label {label[idx].item()}'); ax[0].axis('off')
-
-    # resize to overlay on orig image 
-    cam_np = cams[idx].cpu().numpy()
-    cam_img = Image.fromarray((cam_np * 255).astype(np.uint8))
-    cam_resized = cam_img.resize((28, 28), Image.BICUBIC)
-    cam_resized = np.array(cam_resized) / 255.0  # back to [0,1] float
-
-    ax[1].imshow(image[idx,0].cpu(), cmap='gray')
-    ax[1].imshow(cam_resized, alpha=0.5, cmap='jet')
-
-
-    ax[1].imshow(image[idx,0].cpu(), cmap='gray')
-    # cams[idx] = cams[idx].resize((28,28), Image.BICUBIC)   
-    ax[1].imshow(cam_resized, alpha=0.5, cmap = 'jet')                 # heat‑map overlay
-    ax[1].set_title(f'Grad‑CAM pred: {pred[idx]}'); ax[1].axis('off')
-    plt.tight_layout(); plt.show()
-
-    ax.cla()
-    # ax.clf
-
-    cam_extractor.close()          # clean up hooks
-
-
-def spike_cam(test_loader, model, DEVICE = DEVICE, NUM_STEPS = NUM_STEPS, num_images = 5):
-
-    # pick a batch from your loader
-    images,labels = get_samples(num_images, test_loader)
-    # images, labels = next(iter(test_loader))
-    images, labels = images.to(DEVICE), labels.to(DEVICE)
-
-    # target the second conv layer (after ReLU or LIF both work;
-    # here we tap into conv2 feature maps)
-    cam_extractor = SNNGradCAM.SNNGradCAM(model, model.conv2)
-
-    for i in range(num_images):
-        spike_cam_single(images[i], labels[i], model)
-
-    
-    cam_extractor.close()          # clean up hooks
-
-        
-
-
+     
 
 def run_network(
     model: nn.Module,
@@ -297,43 +196,6 @@ def evaluate(
     accuracy = 100.0 * correct / total
     return avg_loss, accuracy
 
-# self-defined PGD attack function
-def pgd_attack(
-    model: nn.Module,
-    images: torch.Tensor,
-    labels: torch.Tensor,
-    eps: float,
-    alpha: float,
-    iters: int,
-    num_steps: int,
-    device: torch.device,
-):
-    # original images
-    orig = images.detach().to(device)
-    adv = orig.clone().requires_grad_(True).to(device)
-    model.to(device)
-
-    for _ in range(iters):
-        utils.reset(model)  # reset SNN state
-
-        # run SNN for num_steps, accumulate spikes
-        spike_sum = torch.zeros(adv.size(0), N_CLASSES, device=device)
-        for t in range(num_steps):
-            spk = model(adv)
-            spike_sum += spk
-        logits = spike_sum / num_steps
-
-        loss = nn.CrossEntropyLoss()(logits, labels)
-        model.zero_grad()
-        loss.backward()  # fresh graph each iteration
-        grad = adv.grad.data.sign()
-
-        # PGD step
-        adv = adv + alpha * grad
-        delta = torch.clamp(adv - orig, -eps, eps)
-        adv = torch.clamp(orig + delta, 0.0, 1.0).detach().requires_grad_(True)
-
-    return adv.detach()
 
 def visualize_images(model: nn.Module, original: torch.Tensor, adversarial: torch.Tensor, labels: torch.Tensor, num_images: int = 5):
     """
@@ -456,6 +318,69 @@ def evaluate_adversarial(
 
 
 
+
+
+def collect_gradcams_over_pgd(
+    model: nn.Module,
+    image: torch.Tensor,     # single image [1,1,H,W] or [1,C,H,W]
+    label: int,
+    cam_layer: nn.Module,
+    pgd_steps: int = 5,
+    eps: float = 0.004,
+    alpha: float = 0.1,
+    num_steps: int = 40,
+    device: torch.device = DEVICE
+):
+    """
+    Returns a list of (adv_image, cam, pred) for each PGD step (including step 0: original).
+    """
+    # Initial setup
+    image = image.to(device).detach().clone()
+    label_tensor = torch.tensor([label], dtype=torch.long, device=device)
+
+    adv = image.clone().detach().requires_grad_(True)
+    orig = image.clone().detach()
+    cam_list = []
+    
+    # For each step (including the original image as step 0)
+    for step in range(pgd_steps + 1):
+        # Compute Grad-CAM for current (adversarial) image
+        cam_extractor = SNNGradCAM(model, cam_layer)
+        cam, pred = cam_extractor.generate_cam(
+            adv, target_class=label_tensor, num_steps=num_steps, device=device
+        )
+        cam_extractor.close()
+
+        cam_list.append((
+            adv.detach().cpu().clone(),  # perturbed image at this step
+            cam[0].cpu().numpy(),        # Grad-CAM heatmap (0th index: batch of 1)
+            int(pred[0].cpu().item())    # predicted label
+        ))
+
+        # If last step, break
+        if step == pgd_steps:
+            break
+
+        # PGD gradient step
+        adv.requires_grad = True
+        utils.reset(model)
+        spike_sum = torch.zeros(1, N_CLASSES, device=device)
+        for _ in range(num_steps):
+            spike_sum += model(adv)
+        logits = spike_sum / num_steps
+        loss = nn.CrossEntropyLoss()(logits, label_tensor)
+        model.zero_grad()
+        loss.backward()
+        grad = adv.grad.data.sign()
+        adv = adv + alpha * grad
+        delta = torch.clamp(adv - orig, -eps, eps)
+        adv = torch.clamp(orig + delta, 0.0, 1.0).detach().requires_grad_(True)
+    
+    return cam_list  # List of (image, cam, pred) for each PGD step
+
+
+
+
 def main(
     test_model:bool = True,
     train_model: bool = False,
@@ -493,12 +418,12 @@ def main(
         model.load_state_dict(torch.load(load_path, map_location=DEVICE))
 
     if visualize_images:
-        spike_cam(test_loader, model)
+        SNNGradCAM.spike_cam(test_loader, model)
 
     print("showing unadultered saliencies: ")
     images, labels = get_samples(5, test_loader)
-    sal = Saliency_cam.saliency_map(model, images.to(DEVICE), labels.to(DEVICE), NUM_STEPS, DEVICE)
-    Saliency_cam.visualize_saliency(images, sal, labels)
+    # sal = Saliency_cam.saliency_map(model, images.to(DEVICE), labels.to(DEVICE), NUM_STEPS, DEVICE)
+    # Saliency_cam.visualize_saliency(images, sal, labels)
 
 
     train_losses, train_accs = [], []
@@ -542,25 +467,42 @@ def main(
         test_losses.append(test_loss)
         test_accs.append(test_acc)
 
-    # 5.4 PGD adversarial testing (toggle-able)
+    # # PGD adversarial testing (toggle-able)
+    # if do_pgd:
+    #     if pgd_params is None:
+    #         pgd_params = PGD_PARAMS
+    #     adv_loss, adv_acc = evaluate_adversarial(
+    #         model, test_loader, criterion, PGD_PARAMS["num_steps"], DEVICE, pgd_params
+    #     )
+    #     adv_losses.append(adv_loss)
+    #     adv_accs.append(adv_acc)
+    #     print(
+    #         f"[PGD Adversarial Test] Loss: {adv_loss:.4f}  "
+    #         f"Acc: {adv_acc:5.2f}%"
+    #     )
+
+    #     print("showing perturbed saliencies: ")
+    #     images, labels = get_samples(5, test_loader)
+    #     sal = Saliency_cam.saliency_map(model, images.to(DEVICE), labels.to(DEVICE), NUM_STEPS, DEVICE)
+    #     Saliency_cam.visualize_saliency(images, sal, labels)
+
     if do_pgd:
-        if pgd_params is None:
-            pgd_params = PGD_PARAMS
-        adv_loss, adv_acc = evaluate_adversarial(
-            model, test_loader, criterion, PGD_PARAMS["num_steps"], DEVICE, pgd_params
-        )
-        adv_losses.append(adv_loss)
-        adv_accs.append(adv_acc)
-        print(
-            f"[PGD Adversarial Test] Loss: {adv_loss:.4f}  "
-            f"Acc: {adv_acc:5.2f}%"
-        )
+        samples, labels = get_samples(5, test_loader)
+        for i in range(len(samples)):
+            # Pick a test sample (e.g. from DataLoader)
+            label =  labels[i]
+            image = samples[i].unsqueeze(0)
 
-        print("showing perturbed saliencies: ")
-        images, labels = get_samples(5, test_loader)
-        sal = Saliency_cam.saliency_map(model, images.to(DEVICE), labels.to(DEVICE), NUM_STEPS, DEVICE)
-        Saliency_cam.visualize_saliency(images, sal, labels)
+            # Call the function (you can set pgd_steps=10, adjust as needed)
+            cam_list = collect_gradcams_over_pgd(
+                model, image, label, model.conv2, pgd_steps=10, eps=0.3, alpha=0.01, num_steps=NUM_STEPS, device=DEVICE
+            )
 
+            # Optionally, print final predicted class for the last step
+            adv_label = cam_list[-1][2]
+
+            # Plot the results
+            SNNGradCAM.plot_gradcam_progress(cam_list, label, adv_label=adv_label)
 
 
     # 5.5 Plot training curves (only if we trained)
