@@ -18,15 +18,7 @@ def saliency_map(
     Compute saliency maps for SNN by backpropagating the max spike-rate logits
     w.r.t. input images. Returns saliency tensor of same spatial size as images.
 
-    Args:
-        model: Trained ConvSNN model
-        images: Input batch tensor [B, C, H, W]
-        labels: Target labels [B]
-        num_steps: Number of time steps to accumulate spikes
-        device: torch.device
-
-    Returns:
-        saliency: Tensor [B, H, W] of absolute gradient values
+    Returns: Tensor [B, H, W] of absolute gradient values
     """
     model.eval()
     images = images.to(device).requires_grad_(True)
@@ -69,8 +61,8 @@ def visualize_saliency(
     for i in range(min(num_images, images.size(0))):
         
         fig, axes = plt.subplots(1, 2, figsize=(6, 3))
-        axes.cla()
-        axes[0].imshow(original[i, 0], cmap='gray')
+        
+        axes[0].imshow(original[i, 0].detach().numpy(), cmap='gray')
         axes[0].set_title(f'Input - Label {labels[i].item()}')
         axes[0].axis('off')
 
@@ -80,9 +72,3 @@ def visualize_saliency(
 
         plt.tight_layout()
         plt.show()
-
-
-# Example usage in main after loading model and data
-# images, labels = get_samples(5, test_loader)
-# sal = saliency_map(model, images.to(DEVICE), labels.to(DEVICE), NUM_STEPS, DEVICE)
-# visualize_saliency(images, sal, labels)
