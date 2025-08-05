@@ -1,3 +1,24 @@
 Spiking Neural Network adversarial robustness checking using PGD and FGSM (adapted for spiking) attacks. Uses Class Activation Maps and Saliency mapping
 for explainable-AI techniques to understand model degradation under adv. perturbations.
 
+
+Features
+
+- **PGD & FGSM for Spiking Models**  
+  Implements Projected Gradient Descent (PGD) and Fast Gradient Sign Method (FGSM) attacks, modified to account for discrete spike trains and membrane dynamics.
+
+- **Explainable AI Techniques**  
+  - **Class Activation Maps (CAMs)** to localize important spatial features.  
+  - **Saliency Mapping** to highlight time-step contributions and neuron sensitivities.
+
+- **Leaky Integrate-and-Fire (LIF) Backbone**  
+  - BPTT with surrogate gradients for backpropagation through spike events.  
+  - Configurable membrane time constants and thresholding behavior.
+
+- **Modular & Extensible**  
+  Easily swap in different SNN architectures, surrogate gradient functions, and attack parameters.
+
+TODO:
+- refractor for extensibility
+- comparison w CNN
+- adv. robustness training to guard against attacks
